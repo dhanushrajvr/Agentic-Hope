@@ -22,14 +22,10 @@ store = ConversationStore(keep_last=20)
 
 # ---------------------------------------------------------------- YOUR CODE
 def chat(thread_id: str, message: str) -> str:
-    """TODO: implement in three steps.
-
-    1. history = store.load(thread_id)
-    2. result  = agent.run(message, history=history)
-    3. store.save(thread_id, result.messages)
-       return result.output
-    """
-    raise NotImplementedError("Complete chat() - see the docstring above.")
+    history = store.load(thread_id)
+    result = agent.run(message, history=history)
+    store.save(thread_id, result.messages)
+    return result.output
 # ------------------------------------------------------------ END YOUR CODE
 
 

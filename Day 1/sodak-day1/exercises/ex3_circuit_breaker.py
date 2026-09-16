@@ -27,9 +27,8 @@ def check_exam_results(roll_number: str) -> dict:
     Args:
         roll_number: The roll number, for example 21CS045.
     """
-    # TODO: raise an exception here to simulate a broken backend.
-    #       e.g. raise ConnectionError("results server unreachable (timeout after 5s)")
-    raise NotImplementedError("Make this tool fail - see the TODO above.")
+    # Raise an exception here to simulate a broken backend.
+    raise ConnectionError("results server unreachable (timeout after 5s)")
 # ------------------------------------------------------------ END YOUR CODE
 
 
