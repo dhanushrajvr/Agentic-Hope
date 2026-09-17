@@ -29,6 +29,9 @@ class Agent:
         self.trace: list[dict] = []        # what happened, step by step
         # TODO (Part 3.3): if memory and thread_id are given, start self.contents from
         # memory.load_history(thread_id), as {"role": ..., "text": ...} entries.
+        if self.memory and self.thread_id:
+            history = self.memory.load_history(self.thread_id)
+            self.contents: list[dict] = [{"role": h["role"], "text": h["text"]} for h in history]
 
     def _log(self, entry: dict) -> None:
         """Add one entry to the trace and tell on_step about it. (Given.)"""
@@ -87,63 +90,85 @@ class Agent:
         """One user turn: loop model calls and tool calls until the model answers."""
         self.contents.append({"role": "user", "text": text})
 
+        run_id = None
+        if self.memory and self.thread_id:
+            self.memory.append_message(self.thread_id, "user", text or "")
+            model_name = getattr(self.provider, "model", "mock")
+            run_id = self.memory.start_run(self.thread_id, model_name)
+
         step = 1
-        while True:
-            if step > MAX_STEPS:
-                raise AgentError("step_limit", "Maximum tool/model steps exceeded.")
+        try:
+            while True:
+                if step > MAX_STEPS:
+                    raise AgentError("step_limit", "Maximum tool/model steps exceeded.")
 
-            turn = self.provider.generate(
-                self.system,
-                self.contents,
-                list(self.tools.functions().values()),
-            )
+                turn = self.provider.generate(
+                    self.system,
+                    self.contents,
+                    list(self.tools.functions().values()),
+                )
 
-            self._log({
-                "step": step,
-                "kind": "model",
-                "tokens_in": turn.tokens_in,
-                "tokens_out": turn.tokens_out,
-            })
-            step += 1
+                # record model step in memory before inspecting tool calls
+                if run_id:
+                    self.memory.record_model_step(run_id, step, turn.tokens_in, turn.tokens_out)
 
-            if not turn.tool_calls:
-                reply = turn.text
-                self.contents.append({
-                    "role": "model",
-                    "text": reply,
-                    "raw": turn.raw,
-                })
-                return reply
-
-            self.contents.append({
-                "role": "model",
-                "text": turn.text,
-                "raw": turn.raw,
-                "tool_calls": [
-                    {"name": c.name, "args": c.args}
-                    for c in turn.tool_calls
-                ],
-            })
-
-            for call in turn.tool_calls:
-                started = time.perf_counter()
-                result = self.run_tool(call.name, call.args)
-                latency_ms = int((time.perf_counter() - started) * 1000)
-
-                ok = "error" not in result
                 self._log({
                     "step": step,
-                    "kind": "tool",
-                    "tool": call.name,
-                    "args": call.args,
-                    "result": result,
-                    "ok": ok,
-                    "ms": latency_ms,
+                    "kind": "model",
+                    "tokens_in": turn.tokens_in,
+                    "tokens_out": turn.tokens_out,
                 })
                 step += 1
 
+                if not turn.tool_calls:
+                    reply = turn.text or ""
+                    self.contents.append({
+                        "role": "model",
+                        "text": reply,
+                        "raw": turn.raw,
+                    })
+                    if self.memory and self.thread_id and run_id:
+                        self.memory.append_message(self.thread_id, "model", reply)
+                        self.memory.finish_run(run_id, "succeeded")
+                    return reply
+
                 self.contents.append({
-                    "role": "tool",
-                    "name": call.name,
-                    "result": result,
+                    "role": "model",
+                    "text": turn.text or "",
+                    "raw": turn.raw,
+                    "tool_calls": [
+                        {"name": c.name, "args": c.args}
+                        for c in turn.tool_calls
+                    ],
                 })
+
+                for call in turn.tool_calls:
+                    started = time.perf_counter()
+                    result = self.run_tool(call.name, call.args)
+                    latency_ms = int((time.perf_counter() - started) * 1000)
+
+                    ok = "error" not in result
+                    self._log({
+                        "step": step,
+                        "kind": "tool",
+                        "tool": call.name,
+                        "args": call.args,
+                        "result": result,
+                        "ok": ok,
+                        "ms": latency_ms,
+                    })
+
+                    if run_id:
+                        self.memory.record_tool_call(run_id, step, call.name, call.args, result, ok, latency_ms)
+
+                    step += 1
+
+                    self.contents.append({
+                        "role": "tool",
+                        "name": call.name,
+                        "result": result,
+                    })
+        except AgentError as e:
+            if run_id:
+                self.memory.finish_run(run_id, "failed", e.code)
+            raise
