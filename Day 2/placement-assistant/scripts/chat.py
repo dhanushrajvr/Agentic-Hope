@@ -19,6 +19,9 @@ from app.notify import OutboxNotifier
 from app.providers import AgentError, GeminiProvider, default_mock
 from app.tools.placement_tools import PlacementTools
 
+from dotenv import load_dotenv
+load_dotenv()
+
 DIM, CYAN, YELLOW, RED, RESET = "\033[2m", "\033[36m", "\033[33m", "\033[31m", "\033[0m"
 if os.name == "nt":
     os.system("")          # enable colours in the Windows terminal
@@ -45,7 +48,7 @@ def main() -> None:
     p.add_argument("--thread", help="continue this thread id from --db")
     a = p.parse_args()
 
-    provider = default_mock() if a.mock else GeminiProvider(os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"))
+    provider = default_mock() if a.mock else GeminiProvider(os.environ.get("GEMINI_MODEL", "gemini-3.5-flash"))
     tools = PlacementTools(InMemoryPlacementRepo(), OutboxNotifier())
 
     memory = thread_id = None

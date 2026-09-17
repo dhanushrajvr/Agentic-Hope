@@ -39,17 +39,26 @@ class Agent:
     # ------------------------------------------------------------------ Part 2.1
 
     def run_tool(self, name: str, args: dict) -> dict:
-        """Call one tool with self.tools.call(name, args). Never raise.
+        """Call a tool without letting the agent crash.
 
-        TODO (Part 2.1):
-          - NotImplementedError -> {"error": "not_implemented", "hint": ...}
-          - any other exception  -> {"error": "tool_failed", "hint": ...}
-        A crash becomes information the model can act on: that is self-healing.
+        Args:
+            name: tool name
+            args: arguments to pass to the tool
+
+        Returns:
+            Either the tool's normal result, or a safe error dict the model can recover from.
         """
-        raise NotImplementedError
+        try:
+            result = self.tools.call(name, args)
+            return result
+        except NotImplementedError as e:
+            return {"error": "not_implemented", "hint": type(e).__name__}
+        except Exception as e:
+            return {"error": "tool_failed", "hint": type(e).__name__}
 
     # ------------------------------------------------------------------ Part 2.2
 
+    '''
     def ask(self, text: str) -> str:
         """One user turn: loop model calls and tool calls until the model answers.
 
@@ -69,4 +78,72 @@ class Agent:
         the loop; record every model step and tool call as it happens; save the reply and finish
         the run as succeeded; on AgentError, finish the run as failed with e.code and re-raise.
         """
-        raise NotImplementedError
+        raise NotImplementedError 
+    
+    '''
+
+    
+    def ask(self, text: str) -> str:
+        """One user turn: loop model calls and tool calls until the model answers."""
+        self.contents.append({"role": "user", "text": text})
+
+        step = 1
+        while True:
+            if step > MAX_STEPS:
+                raise AgentError("step_limit", "Maximum tool/model steps exceeded.")
+
+            turn = self.provider.generate(
+                self.system,
+                self.contents,
+                list(self.tools.functions().values()),
+            )
+
+            self._log({
+                "step": step,
+                "kind": "model",
+                "tokens_in": turn.tokens_in,
+                "tokens_out": turn.tokens_out,
+            })
+            step += 1
+
+            if not turn.tool_calls:
+                reply = turn.text
+                self.contents.append({
+                    "role": "model",
+                    "text": reply,
+                    "raw": turn.raw,
+                })
+                return reply
+
+            self.contents.append({
+                "role": "model",
+                "text": turn.text,
+                "raw": turn.raw,
+                "tool_calls": [
+                    {"name": c.name, "args": c.args}
+                    for c in turn.tool_calls
+                ],
+            })
+
+            for call in turn.tool_calls:
+                started = time.perf_counter()
+                result = self.run_tool(call.name, call.args)
+                latency_ms = int((time.perf_counter() - started) * 1000)
+
+                ok = "error" not in result
+                self._log({
+                    "step": step,
+                    "kind": "tool",
+                    "tool": call.name,
+                    "args": call.args,
+                    "result": result,
+                    "ok": ok,
+                    "ms": latency_ms,
+                })
+                step += 1
+
+                self.contents.append({
+                    "role": "tool",
+                    "name": call.name,
+                    "result": result,
+                })
