@@ -6,18 +6,51 @@ from datetime import date
 
 
 def canonical_json(value) -> str:
-    """TODO (Part 2.1): one spelling per meaning.
-    Sorted keys, no spaces, and whole floats as integers (12.0 and 12 are the same drive id),
-    including inside nested dicts and lists."""
-    raise NotImplementedError
+    """Normalize any JSON-like value into a stable, canonical string representation.
+
+    This method ensures that semantically identical values serialize to the same bytes by sorting dict
+    keys, compacting JSON output without spaces, and converting integer-like floats such as 12.0 to 12.
+    The normalization is recursive, so nested dictionaries and lists are handled consistently as well.
+
+    Args:
+        value: Any value that can be serialized as JSON, including nested dicts and lists.
+
+    Returns:
+        A canonical JSON string that is stable for equivalent values.
+    """
+    def normalize(v):
+        if isinstance(v, float):
+            if v.is_integer():
+                return int(v)
+            return v
+        if isinstance(v, dict):
+            return {str(k): normalize(v[k]) for k in sorted(v, key=str)}
+        if isinstance(v, list):
+            return [normalize(item) for item in v]
+        if isinstance(v, tuple):
+            return [normalize(item) for item in v]
+        return v
+
+    return json.dumps(normalize(value), separators=(",", ":"), sort_keys=True)
 
 
 def idempotency_key(run_id: str, step_seq: int, tool_name: str, args: dict) -> str:
-    """TODO (Part 2.1): the same tool call at the same step of the same run must always get the same key.
-    SHA-256 hex digest of canonical_json([run_id, step_seq, tool_name, args]).
+    """Return a deterministic SHA-256 fingerprint for a tool call on one run step.
 
-    Today it returns a random value, so a replayed call looks brand new."""
-    return uuid.uuid4().hex
+    The same logical tool call on the same step of the same run must always produce the same key,
+    even if argument ordering or equivalent numeric representations differ. The key is computed from a
+    canonical JSON encoding of the full call tuple.
+
+    Args:
+        run_id: The run this call belongs to.
+        step_seq: The sequential step number within the run.
+        tool_name: The tool being invoked.
+        args: The tool call arguments.
+
+    Returns:
+        A 64-character hexadecimal SHA-256 digest.
+    """
+    return hashlib.sha256(canonical_json([run_id, step_seq, tool_name, args]).encode()).hexdigest()
 
 
 def notification_dedupe_key(roll_no: str, message: str, day: date) -> str:

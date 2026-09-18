@@ -48,19 +48,32 @@ def rebuild(store: RunStore, thread_id: str, run_id: str):
 
 
 def call_tool(tools: PlacementTools, placement: PlacementDb, key: str, name: str, args: dict) -> dict:
-    """Run one tool. Never raises.
+    """Run one tool and preserve exact-once behavior for side effects.
 
-    TODO (Part 2.3): side-effect tools (name in tools.SIDE_EFFECTS) must run through
-    placement.once(key, name, ...) so a replayed call returns the stored result instead of acting again.
-    Keep the exception handling OUTSIDE once(): a tool that raises must roll back and store no key.
+    Read-only tools execute directly, while side-effect tools are wrapped in the transactional
+    placement.once guard so a replayed call returns the stored result instead of performing the side
+    effect again. The exception handling remains outside the idempotency guard so a tool failure does
+    not leave a stored key behind.
+
+    Args:
+        tools: The tool set exposed to the agent.
+        placement: The database that owns the idempotency table and side effects.
+        key: The deterministic idempotency key for this call.
+        name: The tool name being invoked.
+        args: The arguments passed to the tool.
+
+    Returns:
+        The tool result dictionary, or a structured error payload if the tool call itself failed.
     """
     try:
+        if name in tools.SIDE_EFFECTS:
+            result, _ = placement.once(key, name, lambda: tools.call(name, args))
+            return result
         return tools.call(name, args)
     except NotImplementedError:
         return {"error": "not_implemented", "hint": f"{name} is not available yet. Tell the user."}
     except Exception as e:
         return {"error": "tool_failed", "hint": f"{name} failed ({type(e).__name__}). Try another way or tell the user."}
-
 
 def execute_run(claimed: Claimed, *, store: RunStore, placement: PlacementDb, tools: PlacementTools, provider,
                 worker_id: str, lease_seconds: float, on_step: Callable[[dict], None] | None = None,

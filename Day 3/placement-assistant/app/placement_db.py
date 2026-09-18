@@ -165,11 +165,31 @@ class PlacementDb:
     # ------------------------------------------------------------------ Part 2: idempotency (TODO)
 
     def once(self, key: str, tool_name: str, effect: Callable[[], dict]) -> tuple[dict, bool]:
-        """TODO (Part 2.2): run `effect` at most once per key.
+        """Run a side effect at most once per idempotency key.
 
-        In ONE transaction (with self.transaction() as conn):
-          key already in the idempotency table -> return (its stored result, False); do not run the effect
-          otherwise -> result = effect(); store key, tool_name, JSON result, now; return (result, True)
-        If the effect raises, nothing is stored and nothing it wrote survives."""
-        raise NotImplementedError
+        This method must be fully transactional: the existence check, the side effect execution, and the
+        insertion of the stored result all happen inside the same transaction. If the effect raises an
+        exception, the transaction is rolled back and no key or partial side effect remains. If the key is
+        already known, the stored result is returned without re-running the effect.
+
+        Args:
+            key: Unique idempotency key for this logical side effect.
+            tool_name: The tool name recorded alongside the stored result.
+            effect: Callable that performs the side effect and returns a JSON-serializable dict.
+
+        Returns:
+            A pair of (result, created), where created is True only if this call produced and stored the
+            result for the first time.
+        """
+        with self.transaction() as conn:
+            row = conn.execute("SELECT result FROM idempotency WHERE key = ?", (key,)).fetchone()
+            if row is not None:
+                return json.loads(row["result"]), False
+
+            result = effect()
+            conn.execute(
+                "INSERT INTO idempotency (key, tool_name, result, created_at) VALUES (?, ?, ?, ?)",
+                (key, tool_name, json.dumps(result, default=str), self.clock()),
+            )
+            return result, True
 
