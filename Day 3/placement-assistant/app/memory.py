@@ -108,30 +108,116 @@ class RunStore:
     # ================================================================== Part 1: the queue (TODO)
 
     def enqueue(self, thread_id: str, text: str, model: str, max_attempts: int = 3) -> str:
-        """TODO (Part 1.1): in ONE transaction, save the user's message (self.append_message) and insert a
-        run: new uuid4 id, status 'queued', this model, max_attempts, available_at = self.clock().
-        Return the run id. If either insert fails, neither may remain."""
-        raise NotImplementedError
+        """In one transaction, save the user's message and insert the queued run for it."""
+        with self.transaction() as c:
+            self.append_message(thread_id, "user", text)
+            run_id = str(uuid.uuid4())
+            c.execute(
+                "INSERT INTO run (id, thread_id, status, model, max_attempts, available_at)"
+                " VALUES (?, ?, 'queued', ?, ?, ?)",
+                (run_id, thread_id, model, max_attempts, self.clock()),
+            )
+            return run_id
 
     def claim_next(self, worker_id: str, lease_seconds: float) -> Claimed | None:
-        """TODO (Part 1.2): atomically take the oldest claimable run (status 'queued', available_at <= now,
-        oldest available_at then created_at). Set status 'running', lease_owner = worker_id,
-        lease_until = now + lease_seconds, attempts + 1, started_at if not set. Return Claimed(run_id,
-        thread_id, attempts after the increment), or None.
-        Two workers must never get the same run: find it and take it inside one BEGIN IMMEDIATE."""
-        raise NotImplementedError
+        """Claim the oldest runnable job for a worker in one atomic transaction.
+
+        This method selects the earliest queued run that is available at the current time and leases it
+        to the calling worker. The lookup and state change happen in the same transaction, so the write
+        lock is taken before the row is selected and two workers cannot both pull the same run.
+
+        Args:
+            worker_id: The worker that will own the lease for the selected run.
+            lease_seconds: The duration of the lease, in seconds, granted to this worker.
+
+        Returns:
+            A Claimed object containing the run id, thread id, and updated attempt count, or None if no
+            queued run is currently claimable.
+        """
+        with self.transaction() as c:
+            now = self.clock()
+            row = c.execute(
+                "SELECT id, thread_id, attempts FROM run "
+                "WHERE status = 'queued' AND available_at <= ? "
+                "ORDER BY available_at ASC, created_at ASC LIMIT 1",
+                (now,),
+            ).fetchone()
+            if row is None:
+                return None
+
+            attempts = row["attempts"] + 1
+            run_id = row["id"]
+            c.execute(
+                "UPDATE run SET status = 'running', lease_owner = ?, lease_until = ?, attempts = ?, "
+                "started_at = COALESCE(started_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) "
+                "WHERE id = ? AND status = 'queued' AND available_at <= ?",
+                (worker_id, now + lease_seconds, attempts, run_id, now),
+            )
+            return Claimed(run_id=run_id, thread_id=row["thread_id"], attempts=attempts)
 
     def heartbeat(self, run_id: str, worker_id: str, lease_seconds: float) -> bool:
-        """TODO (Part 1.3): push lease_until to now + lease_seconds, but only while the run is 'running'
-        AND leased to this worker. Return True if it was extended, False otherwise."""
-        raise NotImplementedError
+        """Extend a worker's lease while the run is still running and assigned to that worker.
+
+        The lease deadline is moved forward only if the current run is still in the running state and is
+        still leased to the calling worker. If the worker no longer owns the lease, the method returns
+        False and the worker must stop writing further state.
+
+        Args:
+            run_id: The run whose lease should be renewed.
+            worker_id: The worker currently holding the lease.
+            lease_seconds: The amount of time to extend the lease by.
+
+        Returns:
+            True if the lease was successfully extended, otherwise False.
+        """
+        with self.transaction() as c:
+            now = self.clock()
+            row = c.execute(
+                "SELECT 1 FROM run WHERE id = ? AND status = 'running' AND lease_owner = ?",
+                (run_id, worker_id),
+            ).fetchone()
+            if row is None:
+                return False
+            c.execute(
+                "UPDATE run SET lease_until = ? WHERE id = ? AND status = 'running' AND lease_owner = ?",
+                (now + lease_seconds, run_id, worker_id),
+            )
+            return True
 
     def reap_expired(self) -> list[str]:
-        """TODO (Part 1.4): find 'running' runs whose lease_until is in the past (their worker died).
-        attempts < max_attempts: back to 'queued', available now. Otherwise: 'dead' with finished_at.
-        Either way set error_code 'lease_expired' and clear lease_owner and lease_until.
-        Return the ids touched. One transaction."""
-        raise NotImplementedError
+        """Recover runs whose workers died without releasing their lease.
+
+        Any running run whose lease deadline has passed is considered abandoned. If it still has a retry
+        budget remaining, it is returned to the queue with a fresh available time; otherwise it is marked
+        dead. In both cases the lease metadata is cleared and a lease_expired error is recorded.
+
+        Returns:
+            The ids of every run that was requeued or dead-lettered in this pass.
+        """
+        with self.transaction() as c:
+            now = self.clock()
+            rows = c.execute(
+                "SELECT id, attempts, max_attempts FROM run WHERE status = 'running' AND lease_until <= ?",
+                (now,),
+            ).fetchall()
+            touched = []
+            for row in rows:
+                run_id = row["id"]
+                touched.append(run_id)
+                if row["attempts"] < row["max_attempts"]:
+                    c.execute(
+                        "UPDATE run SET status = 'queued', available_at = ?, lease_owner = NULL, lease_until = NULL, "
+                        "error_code = 'lease_expired', finished_at = NULL WHERE id = ?",
+                        (now, run_id),
+                    )
+                else:
+                    c.execute(
+                        "UPDATE run SET status = 'dead', lease_owner = NULL, lease_until = NULL, "
+                        "error_code = 'lease_expired', finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                        "WHERE id = ?",
+                        (run_id,),
+                    )
+            return touched
 
     def complete(self, run_id: str, worker_id: str, reply: str) -> bool:
         """Save the model's reply and mark the run succeeded, together, only if this worker still owns it."""
