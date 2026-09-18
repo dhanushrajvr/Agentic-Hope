@@ -119,7 +119,17 @@ class ConversationStore:
     # ------------------------------------------------------------------ Lab 3
 
     def page_messages(self, thread_id: str, after_seq: int = 0, limit: int = 20) -> tuple[list[dict], int | None]:
-        """TODO (lab 3): up to `limit` messages with seq > after_seq, as {"seq", "role", "text", "created_at"}.
-        Also return the after_seq for the next page, or None if this is the last page.
-        No OFFSET. limit below 1 raises ValueError."""
-        raise NotImplementedError
+        if limit < 1:
+            raise ValueError("limit must be >= 1")
+        rows = self.conn.execute(
+            "SELECT seq, role, text, created_at FROM message "
+            "WHERE thread_id = ? AND seq > ? ORDER BY seq LIMIT ?",
+            (thread_id, after_seq, limit + 1)
+        ).fetchall()
+        more = len(rows) > limit
+        if more:
+            rows = rows[:limit]
+            next_after = rows[-1]["seq"]
+        else:
+            next_after = None
+        return [dict(r) for r in rows], next_after

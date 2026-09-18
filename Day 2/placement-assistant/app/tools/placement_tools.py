@@ -34,7 +34,7 @@ class PlacementTools:
     Copy their patterns for the tools marked TODO.
     """
 
-    READ_ONLY = ("list_open_drives", "get_student", "check_eligibility")
+    READ_ONLY = ("list_open_drives", "get_student", "check_eligibility", "list_my_applications")
     SIDE_EFFECTS = ("apply_to_drive", "book_interview_slot", "notify_student")
     TOOL_NAMES = READ_ONLY + SIDE_EFFECTS
 
@@ -257,10 +257,62 @@ class PlacementTools:
     # otherwise notification_id = self.notifier.send(student_id, message)
     # Returns {"notification_id", "status": "queued"}.
     def notify_student(self, student_id: str, message: str) -> dict:
-        """Notifies a student with a message. Returns the notification details or an error."""
-        raise NotImplementedError
+        """Side effect: send a short notification message to ONE student.
+
+        This tool sends a single notification through the placement cell's notifier.
+        It validates the student id and enforces a 1–160 character limit on the message.
+        Use this only when the user explicitly asks to notify someone (for example:
+        "Text me a reminder the day before my Zoho interview"). Do NOT call this for
+        exploratory questions (availability, deadlines, eligibility) — those are read-only.
+
+        Args:
+            student_id: Roll number, e.g. "22CS045".
+            message: The text to send; must be non-empty and at most 160 chars.
+
+        Returns:
+            On success: {"notification_id", "status": "queued"}.
+            On failure: an error dict. Errors: "unknown_student", "invalid_message".
+        """
+        s = self.repo.get_student(student_id)
+        if s is None:
+            return _unknown_student(student_id)
+
+        if not message or not message.strip() or len(message) > 160:
+            return {"error": "invalid_message",
+                    "hint": "Message must be 1..160 non-empty characters."}
+
+        notification_id = self.notifier.send(student_id, message)
+        return {"notification_id": notification_id, "status": "queued"}
 
     # STRETCH — design a tool of your own: list_my_applications(student_id)
     # "Where have I applied? When is my interview?" Add it to READ_ONLY, write the description,
     # and use repo.list_applications(student.id), which is already given.
     # tests/test_stretch_my_applications.py switches on as soon as the method exists.
+        def list_my_applications(self, student_id: str) -> dict:
+            """Read-only. List this student's applications and interview times.
+
+            Returns:
+                {"applications": [
+                    {"application_id", "drive_id", "company", "role", "status",
+                    "applied_on", "interview_at"}
+                ]}.
+
+            The list is oldest-first. `applied_on` and `interview_at` are ISO-8601 strings;
+            `interview_at` is null if no slot is booked. Error: "unknown_student".
+            """
+            s = self.repo.get_student(student_id)
+            if s is None:
+                return _unknown_student(student_id)
+
+            apps = []
+            for a in self.repo.list_applications(s.id):
+                apps.append({
+                    "application_id": a["application_id"],
+                    "drive_id": a["drive_id"],
+                    "company": a["company"],
+                    "role": a["role"],
+                    "status": a["status"],
+                    "applied_on": a["created_at"].isoformat(),
+                    "interview_at": a["interview_at"].isoformat() if a["interview_at"] is not None else None,
+                })
+            return {"applications": apps}

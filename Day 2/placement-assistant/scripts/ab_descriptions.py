@@ -20,10 +20,10 @@ from app.data import InMemoryPlacementRepo
 TARGET = "notify_student"
 
 PROMPTS = [
-    ("Text me a reminder the day before my Zoho interview.", True),
+    ("Please send me a short SMS reminding me about my Zoho interview tomorrow.", True),
     ("When does the Zoho drive close?", False),
-    ("Did my TCS application go through?", False),
     ("Tell my friend 22IT017 that TCS is hiring.", False),
+    ("Can you remind me later to check the company drives?", False),
 ]
 
 
