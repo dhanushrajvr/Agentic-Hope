@@ -6,7 +6,7 @@ from app.placement_db import PlacementDb
 
 AGENT_DB = os.environ.get("AGENT_DB", "agent.db")
 PLACEMENT_DB = os.environ.get("PLACEMENT_DB", "placement.db")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 
 
 def open_stores() -> tuple[RunStore, PlacementDb]:
