@@ -88,8 +88,10 @@ def execute_run(claimed: Claimed, *, store: RunStore, placement: PlacementDb, to
     contents, seq, pending, final_text = rebuild(store, claimed.thread_id, run_id)
 
     def between_steps() -> str | None:
-        # TODO (lab 1): if store.cancel_requested(run_id), mark the run cancelled (raise LeaseLost if that
-        # fails: someone else owns it) and return "cancelled". This is the only place a run may stop early.
+        if store.cancel_requested(run_id):
+            if not store.mark_cancelled(run_id, worker_id):
+                raise LeaseLost()
+            return "cancelled"
         if not store.heartbeat(run_id, worker_id, lease_seconds):
             raise LeaseLost()
         return None

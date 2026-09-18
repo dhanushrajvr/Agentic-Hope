@@ -234,36 +234,118 @@ class RunStore:
     # ================================================================== Lab 1: cancel
 
     def request_cancel(self, run_id: str) -> str | None:
-        """TODO (lab 1): queued -> 'cancelled' at once, with finished_at. running -> set cancel_requested = 1
-        (its worker stops after the current step). Anything else: leave it. Return the status after the
-        call, or None for an unknown run."""
-        raise NotImplementedError
+        """Request cancellation for a run and return the status after the request is processed.
+
+        A queued run is cancelled immediately and marked finished. A running run is only flagged for
+        cancellation so the worker can stop after the current step. Any other state is left alone.
+
+        Args:
+            run_id: The run being cancelled.
+
+        Returns:
+            The run's status after the request, or None if the run does not exist.
+        """
+        row = self.conn.execute("SELECT status FROM run WHERE id = ?", (run_id,)).fetchone()
+        if row is None:
+            return None
+        status = row["status"]
+        if status == "queued":
+            self.conn.execute(
+                f"UPDATE run SET status = 'cancelled', lease_owner = NULL, lease_until = NULL, "
+                f"finished_at = {NOW_SQL} WHERE id = ?",
+                (run_id,),
+            )
+            return "cancelled"
+        if status == "running":
+            self.conn.execute(
+                "UPDATE run SET cancel_requested = 1 WHERE id = ? AND status = 'running'",
+                (run_id,),
+            )
+            return "running"
+        return status
 
     def cancel_requested(self, run_id: str) -> bool:
         return bool(self.conn.execute("SELECT cancel_requested FROM run WHERE id = ?", (run_id,)).fetchone()[0])
 
     def mark_cancelled(self, run_id: str, worker_id: str) -> bool:
-        """TODO (lab 1): 'running' and leased to this worker -> 'cancelled', clear the lease, set finished_at.
-        Return True if it changed the run."""
-        raise NotImplementedError
+        """Finalise a cancellation for a currently owned running run.
+
+        This method only applies when the run is still running and the caller still owns the lease. The run
+        is marked cancelled, the lease is cleared, and the finish time is set.
+
+        Args:
+            run_id: The run to cancel.
+            worker_id: The worker that currently owns the lease.
+
+        Returns:
+            True if the run was successfully marked cancelled, otherwise False.
+        """
+        with self.transaction() as c:
+            row = c.execute(
+                "SELECT 1 FROM run WHERE id = ? AND status = 'running' AND lease_owner = ?",
+                (run_id, worker_id),
+            ).fetchone()
+            if row is None:
+                return False
+            c.execute(
+                f"UPDATE run SET status = 'cancelled', lease_owner = NULL, lease_until = NULL, "
+                f"cancel_requested = 0, finished_at = {NOW_SQL} WHERE id = ?",
+                (run_id,),
+            )
+            return True
 
     # ================================================================== Lab 2: retry and dead-letter
 
     def fail_attempt(self, run_id: str, worker_id: str, error_code: str, retryable: bool,
-                     backoff_seconds: float = 2.0) -> str | None:
-        """An attempt failed. Only if this worker owns the run. Return the new status, or None.
+                 backoff_seconds: float = 2.0) -> str | None:
+        """Record a failed attempt and decide whether to retry or dead-letter the run.
 
-        TODO (lab 2): today every failure is final. Make it:
-          not retryable                      -> 'failed'
-          retryable, attempts < max_attempts -> 'queued', available_at = now + backoff_seconds * 2 ** (attempts - 1)
-          retryable, attempts used up        -> 'dead'
+        This method only applies when the calling worker still owns the lease on the running run. The
+        error code is always persisted, the lease is always cleared, and the run transitions to either
+        a final failed/dead state or a queued retry with backoff.
+
+        Args:
+            run_id: The run whose attempt failed.
+            worker_id: The worker that currently owns the run lease.
+            error_code: The failure reason recorded for the run.
+            retryable: Whether another attempt could succeed later.
+            backoff_seconds: Base delay used before retrying a retryable failure.
+
+        Returns:
+            The run status after handling the failure, or None if the worker no longer owns the run.
         """
         with self.transaction() as c:
-            row = c.execute("SELECT attempts FROM run WHERE id = ? AND status = 'running' AND lease_owner = ?",
-                            (run_id, worker_id)).fetchone()
+            row = c.execute(
+                "SELECT attempts, max_attempts FROM run WHERE id = ? AND status = 'running' AND lease_owner = ?",
+                (run_id, worker_id),
+            ).fetchone()
             if row is None:
                 return None
-            c.execute(f"UPDATE run SET status = 'failed', error_code = ?, lease_owner = NULL, lease_until = NULL,"
-                      f" finished_at = {NOW_SQL} WHERE id = ?", (error_code, run_id))
-            return "failed"
+
+            attempts = row["attempts"]
+            max_attempts = row["max_attempts"]
+            now = self.clock()
+
+            if not retryable:
+                c.execute(
+                    f"UPDATE run SET status = 'failed', error_code = ?, lease_owner = NULL, lease_until = NULL, "
+                    f"finished_at = {NOW_SQL} WHERE id = ?",
+                    (error_code, run_id),
+                )
+                return "failed"
+
+            if attempts < max_attempts:
+                c.execute(
+                    "UPDATE run SET status = 'queued', error_code = ?, lease_owner = NULL, lease_until = NULL, "
+                    "finished_at = NULL, available_at = ? WHERE id = ?",
+                    (error_code, now + backoff_seconds * (2 ** (attempts - 1)), run_id),
+                )
+                return "queued"
+
+            c.execute(
+                f"UPDATE run SET status = 'dead', error_code = ?, lease_owner = NULL, lease_until = NULL, "
+                f"finished_at = {NOW_SQL} WHERE id = ?",
+                (error_code, run_id),
+            )
+            return "dead"
 
