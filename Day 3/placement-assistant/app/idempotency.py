@@ -54,8 +54,20 @@ def idempotency_key(run_id: str, step_seq: int, tool_name: str, args: dict) -> s
 
 
 def notification_dedupe_key(roll_no: str, message: str, day: date) -> str:
-    """TODO (Part 3.3): the same message to the same student on the same day is one notification.
-    SHA-256 hex of canonical_json([roll_no, message with runs of whitespace collapsed and trimmed, day.isoformat()]).
+    """Build a stable dedupe key for a notification sent to one student on one day.
 
-    Today it returns a random value, so nothing is ever deduplicated."""
-    return uuid.uuid4().hex
+    The message is normalized by trimming surrounding whitespace and collapsing runs of whitespace to a
+    single space before hashing. The resulting value is combined with the student's roll number and the
+    ISO date so the same message sent on the same day gets the same key, while a different day or
+    different student produces a different key.
+
+    Args:
+        roll_no: The student roll number receiving the message.
+        message: The notification text to normalize and hash.
+        day: The date the notification is being sent.
+
+    Returns:
+        A 64-character SHA-256 hex digest for the dedupe key.
+    """
+    normalized = " ".join(message.strip().split())
+    return hashlib.sha256(canonical_json([roll_no, normalized, day.isoformat()]).encode()).hexdigest()

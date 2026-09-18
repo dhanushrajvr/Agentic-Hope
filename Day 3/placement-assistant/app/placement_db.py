@@ -124,32 +124,78 @@ class PlacementDb:
     # ------------------------------------------------------------------ Part 3: safe writes (TODO)
 
     def create_application(self, student_id: int, drive_id: int) -> tuple[int, bool]:
-        """Returns (application_id, created).
+        """Create a placement application or return the existing one if it already exists.
 
-        TODO (Part 3.1): a duplicate application is a success, not an error. Today a second insert for the
-        same (student_id, drive_id) raises IntegrityError. Use ON CONFLICT ... DO NOTHING, then return the
-        existing row's id with created = False."""
-        cur = self.conn.execute("INSERT INTO application (student_id, drive_id, created_at) VALUES (?, ?, ?)",
-                                (student_id, drive_id, self.clock()))
+        Repeating the same application for the same student and drive is treated as a successful no-op.
+        The insert is executed with an ON CONFLICT clause so a duplicate does not raise an integrity
+        error; instead, the already-recorded application id is returned with created = False.
+
+        Args:
+            student_id: The student submitting the application.
+            drive_id: The drive being applied to.
+
+        Returns:
+            A tuple of (application_id, created), where created is True only for the first insert.
+        """
+        cur = self.conn.execute(
+            "INSERT INTO application (student_id, drive_id, created_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(student_id, drive_id) DO NOTHING",
+            (student_id, drive_id, self.clock()),
+        )
+        if cur.rowcount == 0:
+            row = self.conn.execute(
+                "SELECT id FROM application WHERE student_id = ? AND drive_id = ?",
+                (student_id, drive_id),
+            ).fetchone()
+            return row["id"], False
         return cur.lastrowid, True
 
     def claim_slot(self, slot_id: int, student_id: int, expected_version: int) -> bool:
-        """True if this call booked the slot.
+        """Book a slot only if it is still free and still on the expected version.
 
-        TODO (Part 3.2): optimistic locking. Book only if the slot is still free AND its version still equals
-        expected_version, and bump the version when you book. Today the version is ignored."""
-        cur = self.conn.execute("UPDATE interview_slot SET student_id = ? WHERE id = ? AND student_id IS NULL",
-                                (student_id, slot_id))
+        The version check and the update are performed in one UPDATE statement so that no other student can
+        claim the slot between the read and the write. If the slot is already booked or the version no
+        longer matches, the statement affects zero rows and the caller treats it as a normal slot-taken
+        outcome.
+
+        Args:
+            slot_id: The interview slot to claim.
+            student_id: The student reserving the slot.
+            expected_version: The version number that was read earlier by the caller.
+
+        Returns:
+            True if the slot was successfully booked; otherwise False.
+        """
+        cur = self.conn.execute(
+            "UPDATE interview_slot SET student_id = ?, version = version + 1 "
+            "WHERE id = ? AND student_id IS NULL AND version = ?",
+            (student_id, slot_id, expected_version),
+        )
         return cur.rowcount == 1
 
     def record_notification(self, roll_no: str, message: str, dedupe_key: str) -> tuple[int, bool]:
-        """Returns (notification_id, created).
+        """Store a notification only if its dedupe key is new.
 
-        TODO (Part 3.3): store it only if no notification has this dedupe_key; otherwise return the existing
-        id with created = False. Today every call inserts (and a repeated key raises IntegrityError)."""
+        The dedupe key uniquely identifies a student-message-day combination. If the notification already
+        exists, this method returns the existing id with created = False instead of raising an integrity
+        error.
+
+        Args:
+            roll_no: The student's roll number.
+            message: The notification text.
+            dedupe_key: The stable dedupe key for the message-day-student combination.
+
+        Returns:
+            A tuple of (notification_id, created), where created is True only for the first insert.
+        """
         cur = self.conn.execute(
-            "INSERT INTO notification (roll_no, message, dedupe_key, created_at) VALUES (?, ?, ?, ?)",
-            (roll_no, message, dedupe_key, self.clock()))
+            "INSERT INTO notification (roll_no, message, dedupe_key, created_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(dedupe_key) DO NOTHING",
+            (roll_no, message, dedupe_key, self.clock()),
+        )
+        if cur.rowcount == 0:
+            row = self.conn.execute("SELECT id FROM notification WHERE dedupe_key = ?", (dedupe_key,)).fetchone()
+            return row["id"], False
         return cur.lastrowid, True
 
     def list_applications(self, student_id: int) -> list[dict]:
